@@ -342,6 +342,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
         }
         EventMsg::Warning(_warning_event) => {}
+        EventMsg::AccountSwitched(_) => {}
         EventMsg::GuardianAssessment(assessment) => {
             if let ApiVersion::V2 = api_version {
                 let notification = guardian_auto_approval_review_notification(

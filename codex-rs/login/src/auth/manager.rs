@@ -134,7 +134,7 @@ impl From<RefreshTokenError> for std::io::Error {
 }
 
 impl CodexAuth {
-    fn from_auth_dot_json(
+    pub(crate) fn from_auth_dot_json(
         codex_home: &Path,
         auth_dot_json: AuthDotJson,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -1022,6 +1022,9 @@ pub struct AuthManager {
     enable_codex_api_key_env: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     forced_chatgpt_workspace_id: RwLock<Option<String>>,
+    account_pool: Option<crate::auth::account_pool::AccountPool>,
+    /// Info about the currently active pool account (None = original auth.json account).
+    active_pool_account: RwLock<Option<crate::auth::account_pool::PoolAccountInfo>>,
 }
 
 impl AuthManager {
@@ -1041,6 +1044,7 @@ impl AuthManager {
         )
         .ok()
         .flatten();
+        let account_pool = crate::auth::account_pool::AccountPool::load(&codex_home);
         Self {
             codex_home,
             inner: RwLock::new(CachedAuth {
@@ -1050,6 +1054,8 @@ impl AuthManager {
             enable_codex_api_key_env,
             auth_credentials_store_mode,
             forced_chatgpt_workspace_id: RwLock::new(None),
+            account_pool,
+            active_pool_account: RwLock::new(None),
         }
     }
 
@@ -1066,6 +1072,8 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
+            account_pool: None,
+            active_pool_account: RwLock::new(None),
         })
     }
 
@@ -1081,6 +1089,8 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
+            account_pool: None,
+            active_pool_account: RwLock::new(None),
         })
     }
 
@@ -1186,6 +1196,109 @@ impl AuthManager {
         } else {
             false
         }
+    }
+
+    // ─── Account Pool Methods ───
+
+    /// Try to switch to the next available account in the pool.
+    /// On success: updates in-memory auth, syncs ALL persistent backends
+    /// (file + keyring + registry), and returns the new account info.
+    pub fn try_switch_pool_account(
+        &self,
+    ) -> Option<crate::auth::account_pool::PoolAccountInfo> {
+        let pool = self.account_pool.as_ref()?;
+        let (info, auth) = pool.try_next_account(self.auth_credentials_store_mode)?;
+
+        // 1) Update in-memory auth (Arc<RwLock> — all subagents see this immediately).
+        self.set_cached_auth(Some(auth));
+
+        // 2) Read the new account's auth.json and persist it through the
+        //    configured storage backend (File / Keyring / Auto / Ephemeral).
+        //    This ensures token refresh, guarded reload, and logout all
+        //    operate on the correct account regardless of storage mode.
+        let accounts_dir = self.codex_home.join("accounts");
+        let src_path = accounts_dir.join(format!("{}.auth.json", info.account_key));
+        match std::fs::read_to_string(&src_path)
+            .map_err(std::io::Error::from)
+            .and_then(|s| serde_json::from_str::<AuthDotJson>(&s).map_err(std::io::Error::from))
+        {
+            Ok(auth_dot_json) => {
+                if let Err(e) = save_auth(
+                    &self.codex_home,
+                    &auth_dot_json,
+                    self.auth_credentials_store_mode,
+                ) {
+                    tracing::warn!("Failed to persist switched auth to storage backend: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read pool auth file for persistence: {e}");
+            }
+        }
+
+        // 3) Update registry.active_account_key so codex-auth and restarts
+        //    know which account is active.
+        if let Err(e) =
+            crate::auth::pool_registry::activate_account(&self.codex_home, &info.account_key)
+        {
+            tracing::warn!("Failed to update registry active account: {e}");
+        }
+
+        // 4) Record active pool account.
+        if let Ok(mut active) = self.active_pool_account.write() {
+            *active = Some(info.clone());
+        }
+        Some(info)
+    }
+
+    /// Mark a pool account as exhausted by its unique `account_key`.
+    pub fn mark_pool_account_exhausted(
+        &self,
+        account_key: &str,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        if let Some(pool) = &self.account_pool {
+            pool.mark_exhausted(account_key, until);
+        }
+    }
+
+    /// Check whether an account pool exists and has available accounts.
+    pub fn has_pool_accounts_available(&self) -> bool {
+        self.account_pool
+            .as_ref()
+            .map_or(false, |p| p.has_available_accounts())
+    }
+
+    /// Get info about the currently active pool account, if any.
+    pub fn active_pool_account(
+        &self,
+    ) -> Option<crate::auth::account_pool::PoolAccountInfo> {
+        self.active_pool_account
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// Feed runtime rate-limit data into the pool so candidate selection
+    /// uses real usage percentages instead of stale/missing data.
+    pub fn update_pool_usage(
+        &self,
+        account_key: &str,
+        primary_used_pct: Option<f64>,
+        secondary_used_pct: Option<f64>,
+    ) {
+        if let Some(pool) = &self.account_pool {
+            pool.update_usage(account_key, primary_used_pct, secondary_used_pct);
+        }
+    }
+
+    /// Get the account_key of the initially active account from the registry.
+    /// This is needed so the retry loop can mark the *original* account as
+    /// exhausted on the very first switch (before `active_pool_account` is set).
+    pub fn initial_pool_active_key(&self) -> Option<String> {
+        self.account_pool
+            .as_ref()
+            .and_then(|p| p.initial_active_key().map(|s| s.to_string()))
     }
 
     pub fn set_external_auth_refresher(&self, refresher: Arc<dyn ExternalAuthRefresher>) {

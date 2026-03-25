@@ -1,5 +1,7 @@
+pub mod account_pool;
 pub mod default_client;
 pub mod error;
+pub mod pool_registry;
 mod storage;
 mod util;
 

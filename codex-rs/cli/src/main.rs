@@ -39,10 +39,12 @@ mod app_cmd;
 #[cfg(target_os = "macos")]
 mod desktop_app;
 mod mcp_cmd;
+mod pool_cmd;
 #[cfg(not(windows))]
 mod wsl_paths;
 
 use crate::mcp_cmd::McpCli;
+use crate::pool_cmd::PoolCli;
 
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -99,6 +101,9 @@ enum Subcommand {
 
     /// Remove stored authentication credentials.
     Logout(LogoutCommand),
+
+    /// Manage account pool for automatic quota switching.
+    Pool(PoolCli),
 
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
@@ -632,6 +637,11 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         Some(Subcommand::McpServer) => {
             reject_remote_mode_for_subcommand(root_remote.as_deref(), "mcp-server")?;
             codex_mcp_server::run_main(arg0_paths.clone(), root_config_overrides).await?;
+        }
+        Some(Subcommand::Pool(mut pool_cli)) => {
+            reject_remote_mode_for_subcommand(root_remote.as_deref(), "pool")?;
+            prepend_config_flags(&mut pool_cli.config_overrides, root_config_overrides.clone());
+            pool_cli.run().await?;
         }
         Some(Subcommand::Mcp(mut mcp_cli)) => {
             reject_remote_mode_for_subcommand(root_remote.as_deref(), "mcp")?;

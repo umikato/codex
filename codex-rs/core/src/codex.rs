@@ -265,6 +265,7 @@ use crate::plugins::PluginsManager;
 use crate::plugins::build_plugin_injections;
 use crate::plugins::render_plugins_section;
 use crate::project_doc::get_user_instructions;
+use crate::protocol::AccountSwitchedEvent;
 use crate::protocol::AgentMessageContentDeltaEvent;
 use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
@@ -6327,6 +6328,19 @@ async fn run_sampling_request(
         )
         .await;
     let mut retries = 0;
+    // Track the currently active pool account_key for exhaustion marking.
+    // On first entry, use active_pool_account (if already switched) or fall
+    // back to initial_pool_active_key (the account loaded from registry at
+    // startup).  This ensures the *first* switch correctly marks the
+    // original account as exhausted so it won't be re-selected.
+    let mut current_pool_key: Option<String> = turn_context
+        .auth_manager
+        .as_ref()
+        .and_then(|am| {
+            am.active_pool_account()
+                .map(|info| info.account_key)
+                .or_else(|| am.initial_pool_active_key())
+        });
     loop {
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
@@ -6353,12 +6367,81 @@ async fn run_sampling_request(
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
                 }
+                // --- Account pool: feed usage data, mark current, then switch ---
+                if let Some(ref auth_manager) = turn_context.auth_manager {
+                    // Feed the rate-limit snapshot into the pool so candidate
+                    // scoring uses real data instead of stale/missing values.
+                    if let Some(key) = current_pool_key.as_ref() {
+                        if let Some(ref rl) = e.rate_limits {
+                            auth_manager.update_pool_usage(
+                                key,
+                                rl.primary.as_ref().map(|w| w.used_percent),
+                                rl.secondary.as_ref().map(|w| w.used_percent),
+                            );
+                        }
+                        auth_manager.mark_pool_account_exhausted(key, e.resets_at);
+                    }
+                    if let Some(info) = auth_manager.try_switch_pool_account() {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::AccountSwitched(AccountSwitchedEvent {
+                                new_account_label: info.label.clone(),
+                                reason: "Usage limit reached".into(),
+                            }),
+                        )
+                        .await;
+                        current_pool_key = Some(info.account_key);
+                        retries = 0;
+                        continue;
+                    } else if auth_manager.has_pool_accounts_available() {
+                        // Pool exists but no account available right now.
+                    } else {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Warning(WarningEvent {
+                                message: "All accounts in the pool are exhausted."
+                                    .to_string(),
+                            }),
+                        )
+                        .await;
+                    }
+                }
                 return Err(CodexErr::UsageLimitReached(e));
             }
             Err(err) => err,
         };
 
+        // For non-retryable errors, attempt account-pool switch for quota errors.
         if !err.is_retryable() {
+            if matches!(&err, CodexErr::QuotaExceeded | CodexErr::UsageNotIncluded) {
+                if let Some(ref auth_manager) = turn_context.auth_manager {
+                    if let Some(key) = current_pool_key.as_ref() {
+                        auth_manager.mark_pool_account_exhausted(key, None);
+                    }
+                    if let Some(info) = auth_manager.try_switch_pool_account() {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::AccountSwitched(AccountSwitchedEvent {
+                                new_account_label: info.label.clone(),
+                                reason: format!("{err}"),
+                            }),
+                        )
+                        .await;
+                        current_pool_key = Some(info.account_key);
+                        retries = 0;
+                        continue;
+                    } else if !auth_manager.has_pool_accounts_available() {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Warning(WarningEvent {
+                                message: "All accounts in the pool are exhausted."
+                                    .to_string(),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+            }
             return Err(err);
         }
 
@@ -6732,6 +6815,7 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         },
         EventMsg::Error(_)
         | EventMsg::Warning(_)
+        | EventMsg::AccountSwitched(_)
         | EventMsg::RealtimeConversationStarted(_)
         | EventMsg::RealtimeConversationRealtime(_)
         | EventMsg::RealtimeConversationClosed(_)

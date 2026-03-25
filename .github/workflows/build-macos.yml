@@ -1,0 +1,94 @@
+name: Build macOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "codex-rs/**"
+      - ".github/workflows/build-macos.yml"
+  pull_request:
+    paths:
+      - "codex-rs/**"
+      - ".github/workflows/build-macos.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: macOS ${{ matrix.target }} (${{ matrix.profile }})
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            profile: dev
+          - target: aarch64-apple-darwin
+            profile: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - name: Compute lockfile hash
+        id: lockhash
+        shell: bash
+        run: |
+          echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            codex-rs/target/
+          key: macos-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}
+          restore-keys: |
+            macos-${{ matrix.target }}-${{ matrix.profile }}-
+
+      - name: cargo clippy (compile + lint)
+        run: |
+          cargo clippy \
+            --target ${{ matrix.target }} \
+            --all-features \
+            --profile ${{ matrix.profile }} \
+            -- -D warnings
+
+      - name: cargo test (dev only)
+        if: matrix.profile == 'dev'
+        run: |
+          cargo test \
+            --target ${{ matrix.target }} \
+            --all-features \
+            --profile dev \
+            -- --test-threads=4
+
+      - name: Build CLI binary (release only)
+        if: matrix.profile == 'release'
+        run: |
+          cargo build \
+            --target ${{ matrix.target }} \
+            --release \
+            --package codex-cli
+
+      - name: Upload binary artifact (release only)
+        if: matrix.profile == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-macos-${{ matrix.target }}
+          path: codex-rs/target/${{ matrix.target }}/release/codex
+          if-no-files-found: error

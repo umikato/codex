@@ -5483,6 +5483,12 @@ impl ChatWidget {
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
+            EventMsg::AccountSwitched(ev) => {
+                self.on_warning(format!(
+                    "Switched to account: {} ({})",
+                    ev.new_account_label, ev.reason
+                ));
+            }
             EventMsg::GuardianAssessment(ev) => self.on_guardian_assessment(ev),
             EventMsg::ModelReroute(_) => {}
             EventMsg::Error(ErrorEvent {

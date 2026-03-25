@@ -1324,6 +1324,10 @@ pub enum EventMsg {
 
     UndoCompleted(UndoCompletedEvent),
 
+    /// Notification that the active account was switched due to quota exhaustion.
+    /// The turn will be retried transparently with the new account.
+    AccountSwitched(AccountSwitchedEvent),
+
     /// Notification that a model stream experienced an error or disconnect
     /// and the system is handling it (e.g., retrying with backoff).
     StreamError(StreamErrorEvent),
@@ -1814,6 +1818,14 @@ impl ErrorEvent {
             .as_ref()
             .is_none_or(CodexErrorInfo::affects_turn_status)
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct AccountSwitchedEvent {
+    /// Label of the account that was switched to (e.g. "user@example.com").
+    pub new_account_label: String,
+    /// Reason for the switch (e.g. "Usage limit reached").
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

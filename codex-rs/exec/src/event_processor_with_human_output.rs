@@ -237,6 +237,15 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 );
             }
             EventMsg::GuardianAssessment(_) => {}
+            EventMsg::AccountSwitched(ev) => {
+                ts_msg!(
+                    self,
+                    "{} Switched to account: {} ({})",
+                    "account:".style(self.yellow).style(self.bold),
+                    ev.new_account_label,
+                    ev.reason
+                );
+            }
             EventMsg::ModelReroute(_) => {}
             EventMsg::DeprecationNotice(DeprecationNoticeEvent { summary, details }) => {
                 ts_msg!(
