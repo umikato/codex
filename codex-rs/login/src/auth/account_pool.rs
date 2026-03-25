@@ -145,10 +145,10 @@ impl AccountPool {
             let mut best_score = f64::MAX;
 
             for (idx, entry) in entries.iter().enumerate() {
-                if let Some(until) = entry.exhausted_until {
-                    if now < until {
-                        continue;
-                    }
+                if let Some(until) = entry.exhausted_until
+                    && now < until
+                {
+                    continue;
                 }
                 let score = entry.usage_score();
                 if score < best_score {
@@ -237,31 +237,31 @@ impl AccountPool {
         if let Ok(mut entries) = self.entries.write() {
             for entry in entries.iter_mut() {
                 if entry.account_key == account_key {
-                    let usage = entry.last_usage.get_or_insert_with(|| {
+                    let usage = entry.last_usage.get_or_insert(
                         pool_registry::LastUsage {
                             primary: None,
                             secondary: None,
                             plan_type: None,
-                        }
-                    });
+                        },
+                    );
                     if let Some(pct) = primary_used_pct {
-                        let w = usage.primary.get_or_insert_with(|| {
+                        let w = usage.primary.get_or_insert(
                             pool_registry::UsageWindow {
                                 used_percent: None,
                                 window_minutes: Some(300),
                                 resets_at: None,
-                            }
-                        });
+                            },
+                        );
                         w.used_percent = Some(pct);
                     }
                     if let Some(pct) = secondary_used_pct {
-                        let w = usage.secondary.get_or_insert_with(|| {
+                        let w = usage.secondary.get_or_insert(
                             pool_registry::UsageWindow {
                                 used_percent: None,
                                 window_minutes: Some(10080),
                                 resets_at: None,
-                            }
-                        });
+                            },
+                        );
                         w.used_percent = Some(pct);
                     }
                     return;
@@ -279,6 +279,6 @@ impl AccountPool {
         let now = Utc::now();
         entries
             .iter()
-            .any(|e| e.exhausted_until.map_or(true, |until| now >= until))
+            .any(|e| e.exhausted_until.is_none_or(|until| now >= until))
     }
 }

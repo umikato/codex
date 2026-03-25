@@ -291,10 +291,10 @@ pub fn remove_accounts(
     for key in keys_to_remove {
         // Delete the per-account auth file.
         let auth_file = account_auth_path(codex_home, key);
-        if let Err(e) = fs::remove_file(&auth_file) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!("Failed to delete {}: {e}", auth_file.display());
-            }
+        if let Err(e) = fs::remove_file(&auth_file)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("Failed to delete {}: {e}", auth_file.display());
         }
         // Remove from registry.
         let before = registry.accounts.len();
@@ -413,14 +413,14 @@ fn import_single_file(codex_home: &Path, path: &Path) -> std::io::Result<ImportR
 fn import_directory(codex_home: &Path, dir: &Path) -> std::io::Result<Vec<ImportResult>> {
     let mut results = Vec::new();
     let mut entries: Vec<_> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
             e.path()
                 .extension()
-                .map_or(false, |ext| ext == "json")
+                .is_some_and(|ext| ext == "json")
         })
         .collect();
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let path = entry.path();
@@ -472,7 +472,7 @@ pub fn find_matching_accounts<'a>(
         .filter(|a| {
             a.email
                 .as_deref()
-                .map_or(false, |e| e.to_lowercase().contains(&q))
+                .is_some_and(|e| e.to_lowercase().contains(&q))
                 || a.alias.to_lowercase().contains(&q)
                 || a.account_key.to_lowercase().contains(&q)
         })

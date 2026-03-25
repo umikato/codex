@@ -1219,8 +1219,7 @@ impl AuthManager {
         let accounts_dir = self.codex_home.join("accounts");
         let src_path = accounts_dir.join(format!("{}.auth.json", info.account_key));
         match std::fs::read_to_string(&src_path)
-            .map_err(std::io::Error::from)
-            .and_then(|s| serde_json::from_str::<AuthDotJson>(&s).map_err(std::io::Error::from))
+            .and_then(|s| serde_json::from_str::<AuthDotJson>(&s).map_err(std::io::Error::other))
         {
             Ok(auth_dot_json) => {
                 if let Err(e) = save_auth(
@@ -1266,7 +1265,7 @@ impl AuthManager {
     pub fn has_pool_accounts_available(&self) -> bool {
         self.account_pool
             .as_ref()
-            .map_or(false, |p| p.has_available_accounts())
+            .is_some_and(|p| p.has_available_accounts())
     }
 
     /// Get info about the currently active pool account, if any.
@@ -1298,7 +1297,7 @@ impl AuthManager {
     pub fn initial_pool_active_key(&self) -> Option<String> {
         self.account_pool
             .as_ref()
-            .and_then(|p| p.initial_active_key().map(|s| s.to_string()))
+            .and_then(|p| p.initial_active_key().map(str::to_string))
     }
 
     pub fn set_external_auth_refresher(&self, refresher: Arc<dyn ExternalAuthRefresher>) {
