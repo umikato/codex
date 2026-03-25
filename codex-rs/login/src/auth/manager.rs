@@ -1265,7 +1265,7 @@ impl AuthManager {
     pub fn has_pool_accounts_available(&self) -> bool {
         self.account_pool
             .as_ref()
-            .is_some_and(|p| p.has_available_accounts())
+            .is_some_and(crate::auth::account_pool::AccountPool::has_available_accounts)
     }
 
     /// Get info about the currently active pool account, if any.
