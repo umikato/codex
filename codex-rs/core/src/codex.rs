@@ -6413,33 +6413,33 @@ async fn run_sampling_request(
 
         // For non-retryable errors, attempt account-pool switch for quota errors.
         if !err.is_retryable() {
-            if matches!(&err, CodexErr::QuotaExceeded | CodexErr::UsageNotIncluded) {
-                if let Some(ref auth_manager) = turn_context.auth_manager {
-                    if let Some(key) = current_pool_key.as_ref() {
-                        auth_manager.mark_pool_account_exhausted(key, None);
-                    }
-                    if let Some(info) = auth_manager.try_switch_pool_account() {
-                        sess.send_event(
-                            &turn_context,
-                            EventMsg::AccountSwitched(AccountSwitchedEvent {
-                                new_account_label: info.label.clone(),
-                                reason: format!("{err}"),
-                            }),
-                        )
-                        .await;
-                        current_pool_key = Some(info.account_key);
-                        retries = 0;
-                        continue;
-                    } else if !auth_manager.has_pool_accounts_available() {
-                        sess.send_event(
-                            &turn_context,
-                            EventMsg::Warning(WarningEvent {
-                                message: "All accounts in the pool are exhausted."
-                                    .to_string(),
-                            }),
-                        )
-                        .await;
-                    }
+            if matches!(&err, CodexErr::QuotaExceeded | CodexErr::UsageNotIncluded)
+                && let Some(ref auth_manager) = turn_context.auth_manager
+            {
+                if let Some(key) = current_pool_key.as_ref() {
+                    auth_manager.mark_pool_account_exhausted(key, None);
+                }
+                if let Some(info) = auth_manager.try_switch_pool_account() {
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::AccountSwitched(AccountSwitchedEvent {
+                            new_account_label: info.label.clone(),
+                            reason: format!("{err}"),
+                        }),
+                    )
+                    .await;
+                    current_pool_key = Some(info.account_key);
+                    retries = 0;
+                    continue;
+                } else if !auth_manager.has_pool_accounts_available() {
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message: "All accounts in the pool are exhausted."
+                                .to_string(),
+                        }),
+                    )
+                    .await;
                 }
             }
             return Err(err);
