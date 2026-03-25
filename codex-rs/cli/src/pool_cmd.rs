@@ -132,8 +132,8 @@ fn run_pool_list(codex_home: &std::path::Path, json: bool) -> Result<()> {
 
     // Table header.
     println!(
-        "{:<30} {:<10} {:>6} {:>8}  {}",
-        "ACCOUNT", "PLAN", "5H%", "WEEKLY%", "STATUS"
+        "{:<30} {:<10} {:>6} {:>8}  STATUS",
+        "ACCOUNT", "PLAN", "5H%", "WEEKLY%"
     );
     println!("{}", "─".repeat(75));
 

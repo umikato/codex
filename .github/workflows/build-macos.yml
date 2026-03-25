@@ -63,6 +63,7 @@ jobs:
       - name: cargo clippy (compile + lint)
         run: |
           cargo clippy \
+            --package codex-cli \
             --target ${{ matrix.target }} \
             --all-features \
             --profile ${{ matrix.profile }} \
@@ -72,6 +73,7 @@ jobs:
         if: matrix.profile == 'dev'
         run: |
           cargo test \
+            --package codex-cli \
             --target ${{ matrix.target }} \
             --all-features \
             --profile dev \
