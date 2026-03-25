@@ -7,12 +7,17 @@
 //!   codex pool switch [query] — switch active account
 //!   codex pool remove [query] — remove account(s) from pool
 
+use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use codex_backend_client::Client as BackendClient;
+use codex_core::config::Config;
 use codex_core::config::find_codex_home;
+use codex_login::AuthCredentialsStoreMode;
+use codex_login::AuthDotJson;
 use codex_login::auth::pool_registry;
 use codex_login::auth::pool_registry::AccountRecord;
 use codex_utils_cli::CliConfigOverrides;
@@ -66,7 +71,7 @@ pub enum PoolSubcommand {
 impl PoolCli {
     pub async fn run(self) -> Result<()> {
         let PoolCli {
-            config_overrides: _,
+            config_overrides,
             subcommand,
         } = self;
 
@@ -74,9 +79,15 @@ impl PoolCli {
 
         match subcommand {
             PoolSubcommand::Login => run_pool_login(&codex_home).await?,
-            PoolSubcommand::List { json } => run_pool_list(&codex_home, json)?,
+            PoolSubcommand::List { json } => {
+                let chatgpt_base_url = load_chatgpt_base_url(&config_overrides).await;
+                run_pool_list(&codex_home, &chatgpt_base_url, json).await?;
+            }
             PoolSubcommand::Import { path } => run_pool_import(&codex_home, &path)?,
-            PoolSubcommand::Switch { query } => run_pool_switch(&codex_home, query.as_deref())?,
+            PoolSubcommand::Switch { query } => {
+                let chatgpt_base_url = load_chatgpt_base_url(&config_overrides).await;
+                run_pool_switch(&codex_home, &chatgpt_base_url, query.as_deref()).await?;
+            }
             PoolSubcommand::Remove { query, all } => {
                 run_pool_remove(&codex_home, query.as_deref(), all)?
             }
@@ -116,8 +127,12 @@ async fn run_pool_login(codex_home: &std::path::Path) -> Result<()> {
 
 // ─── List ───
 
-fn run_pool_list(codex_home: &std::path::Path, json: bool) -> Result<()> {
-    // Clear expired exhaustions and get the up-to-date registry in one pass.
+async fn run_pool_list(
+    codex_home: &std::path::Path,
+    chatgpt_base_url: &str,
+    json: bool,
+) -> Result<()> {
+    refresh_pool_usage(codex_home, chatgpt_base_url).await?;
     let registry = pool_registry::clear_expired_exhaustions(codex_home);
 
     if registry.accounts.is_empty() {
@@ -196,16 +211,18 @@ fn run_pool_import(codex_home: &std::path::Path, path: &std::path::Path) -> Resu
         }
     }
 
-    eprintln!(
-        "\nDone: {imported} imported, {updated} updated, {failed} failed."
-    );
+    eprintln!("\nDone: {imported} imported, {updated} updated, {failed} failed.");
     Ok(())
 }
 
 // ─── Switch ───
 
-fn run_pool_switch(codex_home: &std::path::Path, query: Option<&str>) -> Result<()> {
-    // Clear expired exhaustions and get the up-to-date registry in one pass.
+async fn run_pool_switch(
+    codex_home: &std::path::Path,
+    chatgpt_base_url: &str,
+    query: Option<&str>,
+) -> Result<()> {
+    refresh_pool_usage(codex_home, chatgpt_base_url).await?;
     let registry = pool_registry::clear_expired_exhaustions(codex_home);
 
     if registry.accounts.is_empty() {
@@ -245,11 +262,7 @@ fn run_pool_switch(codex_home: &std::path::Path, query: Option<&str>) -> Result<
 
 // ─── Remove ───
 
-fn run_pool_remove(
-    codex_home: &std::path::Path,
-    query: Option<&str>,
-    all: bool,
-) -> Result<()> {
+fn run_pool_remove(codex_home: &std::path::Path, query: Option<&str>, all: bool) -> Result<()> {
     let mut registry = pool_registry::load_registry(codex_home);
 
     if registry.accounts.is_empty() {
@@ -295,6 +308,166 @@ fn run_pool_remove(
 }
 
 // ─── Helpers ───
+
+async fn load_chatgpt_base_url(config_overrides: &CliConfigOverrides) -> String {
+    let default_base_url = "https://chatgpt.com".to_string();
+    let overrides = match config_overrides.parse_overrides() {
+        Ok(overrides) => overrides,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to parse config overrides for usage refresh: {err}; falling back to {default_base_url}"
+            );
+            return default_base_url;
+        }
+    };
+    match Config::load_with_cli_overrides(overrides).await {
+        Ok(config) => config.chatgpt_base_url,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to load configuration for usage refresh: {err}; falling back to {default_base_url}"
+            );
+            default_base_url
+        }
+    }
+}
+
+async fn refresh_pool_usage(codex_home: &std::path::Path, chatgpt_base_url: &str) -> Result<()> {
+    let registry = pool_registry::clear_expired_exhaustions(codex_home);
+    if registry.accounts.is_empty() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "Refreshing usage snapshots for {} account(s)...",
+        registry.accounts.len()
+    );
+
+    let mut updated = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for account in &registry.accounts {
+        match fetch_account_usage_snapshot(codex_home, chatgpt_base_url, account).await {
+            Ok(Some(snapshot)) => {
+                pool_registry::persist_account_runtime_snapshot(
+                    codex_home,
+                    &account.account_key,
+                    Some(&snapshot.last_usage),
+                    snapshot.exhausted_until,
+                    true,
+                );
+                updated += 1;
+            }
+            Ok(None) => {
+                skipped += 1;
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to refresh usage for '{}': {err}",
+                    account.display_label()
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    eprintln!("Usage refresh done: {updated} updated, {skipped} skipped, {failed} failed.");
+    Ok(())
+}
+
+async fn fetch_account_usage_snapshot(
+    codex_home: &std::path::Path,
+    chatgpt_base_url: &str,
+    account: &AccountRecord,
+) -> Result<Option<RefreshedAccountUsage>> {
+    let encoded = pool_registry::encode_account_key(&account.account_key);
+    let auth_path = codex_home
+        .join("accounts")
+        .join(format!("{encoded}.auth.json"));
+    let auth_json = fs::read_to_string(&auth_path)
+        .with_context(|| format!("failed to read {}", auth_path.display()))?;
+    let auth_dot_json: AuthDotJson = serde_json::from_str(&auth_json)
+        .with_context(|| format!("failed to parse {}", auth_path.display()))?;
+    let auth = codex_login::auth::auth_from_auth_dot_json(
+        codex_home,
+        auth_dot_json,
+        AuthCredentialsStoreMode::File,
+    )
+    .with_context(|| format!("failed to build auth from {}", auth_path.display()))?;
+
+    if !auth.is_chatgpt_auth() {
+        return Ok(None);
+    }
+
+    let client = BackendClient::from_auth(chatgpt_base_url.to_string(), &auth)
+        .context("failed to construct backend client")?;
+    let snapshot = client
+        .get_rate_limits()
+        .await
+        .context("failed to fetch rate limits from /usage")?;
+
+    Ok(refreshed_usage_from_snapshot(&snapshot))
+}
+
+struct RefreshedAccountUsage {
+    last_usage: pool_registry::LastUsage,
+    exhausted_until: Option<i64>,
+}
+
+fn refreshed_usage_from_snapshot(
+    snapshot: &codex_protocol::protocol::RateLimitSnapshot,
+) -> Option<RefreshedAccountUsage> {
+    let primary = snapshot
+        .primary
+        .as_ref()
+        .map(|window| pool_registry::UsageWindow {
+            used_percent: Some(window.used_percent),
+            window_minutes: window.window_minutes,
+            resets_at: window.resets_at,
+        });
+    let secondary = snapshot
+        .secondary
+        .as_ref()
+        .map(|window| pool_registry::UsageWindow {
+            used_percent: Some(window.used_percent),
+            window_minutes: window.window_minutes,
+            resets_at: window.resets_at,
+        });
+
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+
+    let last_usage = pool_registry::LastUsage {
+        primary,
+        secondary,
+        plan_type: snapshot.plan_type.map(plan_type_to_string),
+    };
+    let now_ts = chrono::Utc::now().timestamp();
+    let fallback_ts = (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp();
+    let exhausted_until =
+        pool_registry::compute_exhausted_until_from_usage(&last_usage, now_ts, fallback_ts);
+
+    Some(RefreshedAccountUsage {
+        last_usage,
+        exhausted_until,
+    })
+}
+
+fn plan_type_to_string(plan_type: codex_protocol::account::PlanType) -> String {
+    match plan_type {
+        codex_protocol::account::PlanType::Free => "free",
+        codex_protocol::account::PlanType::Go => "go",
+        codex_protocol::account::PlanType::Plus => "plus",
+        codex_protocol::account::PlanType::Pro => "pro",
+        codex_protocol::account::PlanType::Team => "team",
+        codex_protocol::account::PlanType::Business => "business",
+        codex_protocol::account::PlanType::Enterprise => "enterprise",
+        codex_protocol::account::PlanType::Edu => "edu",
+        codex_protocol::account::PlanType::Unknown => "unknown",
+    }
+    .to_string()
+}
 
 fn format_usage(usage: &Option<pool_registry::LastUsage>) -> (String, String) {
     let Some(u) = usage else {

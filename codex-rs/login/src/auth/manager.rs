@@ -327,6 +327,19 @@ impl CodexAuth {
     }
 }
 
+/// Build a `CodexAuth` from an arbitrary `AuthDotJson` snapshot.
+///
+/// This is intended for tooling that needs to inspect or query account
+/// snapshots stored under `CODEX_HOME/accounts/*.auth.json` without replacing
+/// the process-wide active auth managed by `AuthManager`.
+pub fn auth_from_auth_dot_json(
+    codex_home: &Path,
+    auth_dot_json: AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<CodexAuth> {
+    CodexAuth::from_auth_dot_json(codex_home, auth_dot_json, auth_credentials_store_mode)
+}
+
 impl ChatgptAuth {
     fn current_auth_json(&self) -> Option<AuthDotJson> {
         #[expect(clippy::unwrap_used)]
@@ -1203,11 +1216,13 @@ impl AuthManager {
     /// Try to switch to the next available account in the pool.
     /// On success: updates in-memory auth, syncs ALL persistent backends
     /// (file + keyring + registry), and returns the new account info.
-    pub fn try_switch_pool_account(
+    pub async fn try_switch_pool_account(
         &self,
     ) -> Option<crate::auth::account_pool::PoolAccountInfo> {
         let pool = self.account_pool.as_ref()?;
-        let (info, auth) = pool.try_next_account(self.auth_credentials_store_mode)?;
+        let (info, auth) = pool
+            .try_next_account(self.auth_credentials_store_mode)
+            .await?;
 
         // 1) Update in-memory auth (Arc<RwLock> — all subagents see this immediately).
         self.set_cached_auth(Some(auth));
@@ -1270,13 +1285,8 @@ impl AuthManager {
     }
 
     /// Get info about the currently active pool account, if any.
-    pub fn active_pool_account(
-        &self,
-    ) -> Option<crate::auth::account_pool::PoolAccountInfo> {
-        self.active_pool_account
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
+    pub fn active_pool_account(&self) -> Option<crate::auth::account_pool::PoolAccountInfo> {
+        self.active_pool_account.read().ok().and_then(|g| g.clone())
     }
 
     /// Feed runtime rate-limit data into the pool so candidate selection

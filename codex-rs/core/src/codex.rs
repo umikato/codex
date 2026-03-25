@@ -6333,14 +6333,11 @@ async fn run_sampling_request(
     // back to initial_pool_active_key (the account loaded from registry at
     // startup).  This ensures the *first* switch correctly marks the
     // original account as exhausted so it won't be re-selected.
-    let mut current_pool_key: Option<String> = turn_context
-        .auth_manager
-        .as_ref()
-        .and_then(|am| {
-            am.active_pool_account()
-                .map(|info| info.account_key)
-                .or_else(|| am.initial_pool_active_key())
-        });
+    let mut current_pool_key: Option<String> = turn_context.auth_manager.as_ref().and_then(|am| {
+        am.active_pool_account()
+            .map(|info| info.account_key)
+            .or_else(|| am.initial_pool_active_key())
+    });
     loop {
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
@@ -6381,7 +6378,7 @@ async fn run_sampling_request(
                         }
                         auth_manager.mark_pool_account_exhausted(key, e.resets_at);
                     }
-                    if let Some(info) = auth_manager.try_switch_pool_account() {
+                    if let Some(info) = auth_manager.try_switch_pool_account().await {
                         sess.send_event(
                             &turn_context,
                             EventMsg::AccountSwitched(AccountSwitchedEvent {
@@ -6399,8 +6396,7 @@ async fn run_sampling_request(
                         sess.send_event(
                             &turn_context,
                             EventMsg::Warning(WarningEvent {
-                                message: "All accounts in the pool are exhausted."
-                                    .to_string(),
+                                message: "All accounts in the pool are exhausted.".to_string(),
                             }),
                         )
                         .await;
@@ -6419,7 +6415,7 @@ async fn run_sampling_request(
                 if let Some(key) = current_pool_key.as_ref() {
                     auth_manager.mark_pool_account_exhausted(key, None);
                 }
-                if let Some(info) = auth_manager.try_switch_pool_account() {
+                if let Some(info) = auth_manager.try_switch_pool_account().await {
                     sess.send_event(
                         &turn_context,
                         EventMsg::AccountSwitched(AccountSwitchedEvent {
@@ -6435,8 +6431,7 @@ async fn run_sampling_request(
                     sess.send_event(
                         &turn_context,
                         EventMsg::Warning(WarningEvent {
-                            message: "All accounts in the pool are exhausted."
-                                .to_string(),
+                            message: "All accounts in the pool are exhausted.".to_string(),
                         }),
                     )
                     .await;

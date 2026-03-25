@@ -436,11 +436,7 @@ fn import_directory(codex_home: &Path, dir: &Path) -> std::io::Result<Vec<Import
     let mut results = Vec::new();
     let mut entries: Vec<_> = fs::read_dir(dir)?
         .filter_map(std::result::Result::ok)
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "json")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
 
@@ -571,6 +567,86 @@ pub fn persist_account_state(
     // _lock drops here, releasing flock
 }
 
+/// Persist only the usage snapshot for an account without touching cooldown or
+/// last-used metadata. This is intended for explicit CLI refresh flows that
+/// sample real-time quota state but do not actually activate or exhaust the
+/// account.
+pub fn persist_account_usage(codex_home: &Path, account_key: &str, last_usage: &LastUsage) {
+    let _lock = lock_registry(codex_home).ok();
+    let mut registry = load_registry(codex_home);
+    let Some(acct) = registry
+        .accounts
+        .iter_mut()
+        .find(|a| a.account_key == account_key)
+    else {
+        return;
+    };
+    acct.last_usage = Some(last_usage.clone());
+    acct.last_usage_at = Some(Utc::now().timestamp());
+    if let Err(e) = save_registry(codex_home, &registry) {
+        warn!("Failed to persist account usage: {e}");
+    }
+}
+
+/// Persist runtime usage plus optional exhaustion state without mutating
+/// `last_used_at`. This is intended for background or pre-selection refreshes
+/// that should not look like an account activation.
+pub fn persist_account_runtime_snapshot(
+    codex_home: &Path,
+    account_key: &str,
+    last_usage: Option<&LastUsage>,
+    exhausted_until: Option<i64>,
+    set_exhausted_until: bool,
+) {
+    let _lock = lock_registry(codex_home).ok();
+    let mut registry = load_registry(codex_home);
+    let Some(acct) = registry
+        .accounts
+        .iter_mut()
+        .find(|a| a.account_key == account_key)
+    else {
+        return;
+    };
+    if let Some(usage) = last_usage {
+        acct.last_usage = Some(usage.clone());
+        acct.last_usage_at = Some(Utc::now().timestamp());
+    }
+    if set_exhausted_until {
+        acct.exhausted_until = exhausted_until;
+    }
+    if let Err(e) = save_registry(codex_home, &registry) {
+        warn!("Failed to persist account runtime snapshot: {e}");
+    }
+}
+
+pub fn compute_exhausted_until_from_usage(
+    usage: &LastUsage,
+    now_ts: i64,
+    fallback_ts: i64,
+) -> Option<i64> {
+    let mut next_reset: Option<i64> = None;
+
+    for window in [&usage.primary, &usage.secondary] {
+        let Some(window) = window.as_ref() else {
+            continue;
+        };
+        let used_percent = window.used_percent.unwrap_or(0.0);
+        if used_percent < 100.0 {
+            continue;
+        }
+
+        let candidate_reset = window.resets_at.filter(|reset| *reset > now_ts);
+        next_reset = match (next_reset, candidate_reset) {
+            (Some(current), Some(candidate)) => Some(current.min(candidate)),
+            (None, Some(candidate)) => Some(candidate),
+            (Some(current), None) => Some(current.min(fallback_ts)),
+            (None, None) => Some(fallback_ts),
+        };
+    }
+
+    next_reset
+}
+
 /// Clear `exhausted_until` for all accounts whose cooldown has expired.
 /// Returns the cleaned `Registry` so callers don't need to re-read the file.
 pub fn clear_expired_exhaustions(codex_home: &Path) -> Registry {
@@ -584,9 +660,7 @@ pub fn clear_expired_exhaustions(codex_home: &Path) -> Registry {
             modified = true;
         }
     }
-    if modified
-        && let Err(e) = save_registry(codex_home, &registry)
-    {
+    if modified && let Err(e) = save_registry(codex_home, &registry) {
         warn!("Failed to clear expired exhaustions: {e}");
     }
     registry
