@@ -166,20 +166,27 @@ pub fn load_registry(codex_home: &Path) -> Registry {
     }
 }
 
+/// Atomic save: write to a temp file, flush, then rename over the target.
+/// This prevents partial writes from corrupting registry.json on crash.
 pub fn save_registry(codex_home: &Path, registry: &Registry) -> std::io::Result<()> {
     ensure_accounts_dir(codex_home)?;
     let path = registry_path(codex_home);
     let json = serde_json::to_string_pretty(registry)?;
 
+    // Write to a sibling temp file, then atomically rename.
+    let tmp_path = path.with_extension("json.tmp");
     let mut options = fs::OpenOptions::new();
     options.truncate(true).write(true).create(true);
     #[cfg(unix)]
     {
         options.mode(0o600);
     }
-    let mut file = options.open(&path)?;
+    let mut file = options.open(&tmp_path)?;
     file.write_all(json.as_bytes())?;
     file.flush()?;
+    // fsync to ensure data hits disk before rename.
+    file.sync_all()?;
+    fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -494,10 +501,26 @@ pub fn find_matching_accounts<'a>(
         .collect()
 }
 
+// ─── File locking ───
+
+/// Acquire an exclusive lock on a `.lock` sidecar file to serialize
+/// concurrent read-modify-write cycles on `registry.json`.
+/// Uses `File::lock_exclusive()` (stable since Rust 1.84).
+fn lock_registry(codex_home: &Path) -> std::io::Result<fs::File> {
+    let lock_path = registry_path(codex_home).with_extension("json.lock");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(lock_path)?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
 // ─── Runtime state persistence ───
 
 /// Persist an account's runtime state to `registry.json`.
 ///
+/// Uses a file lock to serialize concurrent modifications.
 /// - `last_usage`: if `Some`, overwrites the stored usage snapshot.
 /// - `set_exhausted_until`: if `true`, sets `exhausted_until` to the given
 ///   value (which may be `None` to clear it); if `false`, leaves the
@@ -509,29 +532,33 @@ pub fn persist_account_state(
     exhausted_until: Option<i64>,
     set_exhausted_until: bool,
 ) {
+    let _lock = lock_registry(codex_home).ok();
     let mut registry = load_registry(codex_home);
-    if let Some(acct) = registry
+    let Some(acct) = registry
         .accounts
         .iter_mut()
         .find(|a| a.account_key == account_key)
-    {
-        if let Some(usage) = last_usage {
-            acct.last_usage = Some(usage.clone());
-            acct.last_usage_at = Some(Utc::now().timestamp());
-        }
-        if set_exhausted_until {
-            acct.exhausted_until = exhausted_until;
-        }
-        acct.last_used_at = Some(Utc::now().timestamp());
+    else {
+        return;
+    };
+    if let Some(usage) = last_usage {
+        acct.last_usage = Some(usage.clone());
+        acct.last_usage_at = Some(Utc::now().timestamp());
     }
+    if set_exhausted_until {
+        acct.exhausted_until = exhausted_until;
+    }
+    acct.last_used_at = Some(Utc::now().timestamp());
     if let Err(e) = save_registry(codex_home, &registry) {
         warn!("Failed to persist account state: {e}");
     }
+    // _lock drops here, releasing flock
 }
 
 /// Clear `exhausted_until` for all accounts whose cooldown has expired.
-/// Returns `true` if any records were modified (and saved).
-pub fn clear_expired_exhaustions(codex_home: &Path) -> bool {
+/// Returns the cleaned `Registry` so callers don't need to re-read the file.
+pub fn clear_expired_exhaustions(codex_home: &Path) -> Registry {
+    let _lock = lock_registry(codex_home).ok();
     let mut registry = load_registry(codex_home);
     let now = Utc::now().timestamp();
     let mut modified = false;
@@ -544,10 +571,9 @@ pub fn clear_expired_exhaustions(codex_home: &Path) -> bool {
     if modified {
         if let Err(e) = save_registry(codex_home, &registry) {
             warn!("Failed to clear expired exhaustions: {e}");
-            return false;
         }
     }
-    modified
+    registry
 }
 
 // ─── File helpers ───

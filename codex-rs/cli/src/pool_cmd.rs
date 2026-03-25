@@ -117,9 +117,8 @@ async fn run_pool_login(codex_home: &std::path::Path) -> Result<()> {
 // ─── List ───
 
 fn run_pool_list(codex_home: &std::path::Path, json: bool) -> Result<()> {
-    // Clear expired exhaustions before displaying so the list is accurate.
-    pool_registry::clear_expired_exhaustions(codex_home);
-    let registry = pool_registry::load_registry(codex_home);
+    // Clear expired exhaustions and get the up-to-date registry in one pass.
+    let registry = pool_registry::clear_expired_exhaustions(codex_home);
 
     if registry.accounts.is_empty() {
         eprintln!("No accounts in pool. Run `codex pool login` to add one.");
@@ -206,9 +205,8 @@ fn run_pool_import(codex_home: &std::path::Path, path: &std::path::Path) -> Resu
 // ─── Switch ───
 
 fn run_pool_switch(codex_home: &std::path::Path, query: Option<&str>) -> Result<()> {
-    // Clear expired exhaustions so the switch considers up-to-date state.
-    pool_registry::clear_expired_exhaustions(codex_home);
-    let registry = pool_registry::load_registry(codex_home);
+    // Clear expired exhaustions and get the up-to-date registry in one pass.
+    let registry = pool_registry::clear_expired_exhaustions(codex_home);
 
     if registry.accounts.is_empty() {
         bail!("No accounts in pool.");

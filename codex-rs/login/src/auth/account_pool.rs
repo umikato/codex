@@ -249,15 +249,16 @@ impl AccountPool {
         self.initial_active_key.as_deref()
     }
 
-    /// Update the cached usage score for an account and persist to registry.
+    /// Update the cached usage score for an account (in-memory only).
+    /// Disk persistence happens later when `mark_exhausted()` is called,
+    /// which bundles the latest usage together with the exhaustion timestamp.
     pub fn update_usage(
         &self,
         account_key: &str,
         primary_used_pct: Option<f64>,
         secondary_used_pct: Option<f64>,
     ) {
-        let persisted_usage = if let Ok(mut entries) = self.entries.write() {
-            let mut found_usage = None;
+        if let Ok(mut entries) = self.entries.write() {
             for entry in entries.iter_mut() {
                 if entry.account_key == account_key {
                     let usage = entry.last_usage.get_or_insert(
@@ -287,24 +288,9 @@ impl AccountPool {
                         );
                         w.used_percent = Some(pct);
                     }
-                    found_usage = Some(usage.clone());
-                    break;
+                    return;
                 }
             }
-            found_usage
-        } else {
-            None
-        };
-
-        // Persist usage to registry.json outside the lock.
-        if let Some(ref usage) = persisted_usage {
-            pool_registry::persist_account_state(
-                &self.codex_home,
-                account_key,
-                Some(usage),
-                None,
-                false, // don't change exhausted_until
-            );
         }
     }
 
