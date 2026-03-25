@@ -34,7 +34,7 @@ struct PoolEntry {
     account_key: String,
     /// Human-readable label: alias > email > account_key
     label: String,
-    /// Path to {account_key}.auth.json
+    /// Path to {base64(account_key)}.auth.json
     auth_file: PathBuf,
     /// Cached usage from registry (used for candidate scoring)
     last_usage: Option<pool_registry::LastUsage>,
@@ -97,12 +97,14 @@ impl AccountPool {
             .accounts
             .into_iter()
             .filter(|acct| {
-                let auth_file = accounts_dir.join(format!("{}.auth.json", acct.account_key));
+                let encoded = pool_registry::encode_account_key(&acct.account_key);
+                let auth_file = accounts_dir.join(format!("{encoded}.auth.json"));
                 auth_file.exists()
             })
             .map(|acct| {
                 let label = acct.display_label().to_string();
-                let auth_file = accounts_dir.join(format!("{}.auth.json", acct.account_key));
+                let encoded = pool_registry::encode_account_key(&acct.account_key);
+                let auth_file = accounts_dir.join(format!("{encoded}.auth.json"));
                 PoolEntry {
                     account_key: acct.account_key,
                     label,

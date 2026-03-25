@@ -1217,7 +1217,8 @@ impl AuthManager {
         //    This ensures token refresh, guarded reload, and logout all
         //    operate on the correct account regardless of storage mode.
         let accounts_dir = self.codex_home.join("accounts");
-        let src_path = accounts_dir.join(format!("{}.auth.json", info.account_key));
+        let encoded = super::pool_registry::encode_account_key(&info.account_key);
+        let src_path = accounts_dir.join(format!("{encoded}.auth.json"));
         match std::fs::read_to_string(&src_path)
             .and_then(|s| serde_json::from_str::<AuthDotJson>(&s).map_err(std::io::Error::other))
         {

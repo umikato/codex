@@ -4,6 +4,7 @@
 //! import, list, switch, remove.  The on-disk format is intentionally
 //! identical to codex-auth's so either tool can manage the same pool.
 
+use base64::Engine;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
@@ -126,8 +127,15 @@ fn registry_path(codex_home: &Path) -> PathBuf {
     accounts_dir(codex_home).join("registry.json")
 }
 
+/// Encode an account_key to the Base64 filename used by codex-auth.
+/// Uses standard Base64 **without** padding (`=`) to match codex-auth's convention.
+pub fn encode_account_key(account_key: &str) -> String {
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(account_key)
+}
+
 fn account_auth_path(codex_home: &Path, account_key: &str) -> PathBuf {
-    accounts_dir(codex_home).join(format!("{account_key}.auth.json"))
+    let encoded = encode_account_key(account_key);
+    accounts_dir(codex_home).join(format!("{encoded}.auth.json"))
 }
 
 fn active_auth_path(codex_home: &Path) -> PathBuf {
