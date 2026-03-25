@@ -16,6 +16,7 @@ codex-client = { workspace = true }
 codex-config = { workspace = true }
 codex-keyring-store = { workspace = true }
 codex-protocol = { workspace = true }
+libc = { workspace = true }
 codex-terminal-detection = { workspace = true }
 once_cell = { workspace = true }
 os_info = { workspace = true }

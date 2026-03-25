@@ -505,15 +505,30 @@ pub fn find_matching_accounts<'a>(
 
 /// Acquire an exclusive lock on a `.lock` sidecar file to serialize
 /// concurrent read-modify-write cycles on `registry.json`.
-/// Uses `File::lock_exclusive()` (stable since Rust 1.84).
+#[cfg(unix)]
 fn lock_registry(codex_home: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::io::AsRawFd;
     let lock_path = registry_path(codex_home).with_extension("json.lock");
     let file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .open(lock_path)?;
-    file.lock_exclusive()?;
+    // LOCK_EX: block until exclusive lock is acquired.
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(file)
+    // Lock is released when `file` is dropped.
+}
+
+/// No-op on non-unix platforms — file locking is best-effort.
+#[cfg(not(unix))]
+fn lock_registry(_codex_home: &Path) -> std::io::Result<fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "file locking not supported on this platform",
+    ))
 }
 
 // ─── Runtime state persistence ───
