@@ -512,6 +512,7 @@ fn lock_registry(codex_home: &Path) -> std::io::Result<fs::File> {
     let file = fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(lock_path)?;
     // LOCK_EX: block until exclusive lock is acquired.
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -583,10 +584,10 @@ pub fn clear_expired_exhaustions(codex_home: &Path) -> Registry {
             modified = true;
         }
     }
-    if modified {
-        if let Err(e) = save_registry(codex_home, &registry) {
-            warn!("Failed to clear expired exhaustions: {e}");
-        }
+    if modified
+        && let Err(e) = save_registry(codex_home, &registry)
+    {
+        warn!("Failed to clear expired exhaustions: {e}");
     }
     registry
 }
