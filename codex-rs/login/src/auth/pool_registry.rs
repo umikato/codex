@@ -82,6 +82,11 @@ pub struct AccountRecord {
     pub last_usage: Option<LastUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_usage_at: Option<i64>,
+    /// Unix timestamp until which this account is considered exhausted.
+    /// Set at runtime when a `UsageLimitReached` error is received;
+    /// cleared automatically when the time has passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhausted_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +228,7 @@ pub fn account_record_from_auth(auth: &AuthDotJson) -> Option<AccountRecord> {
         last_used_at: None,
         last_usage: None,
         last_usage_at: None,
+        exhausted_until: None,
     })
 }
 
@@ -246,6 +252,7 @@ pub fn account_record_from_api_key(api_key: &str, label: &str) -> AccountRecord 
         last_used_at: None,
         last_usage: None,
         last_usage_at: None,
+        exhausted_until: None,
     }
 }
 
@@ -485,6 +492,62 @@ pub fn find_matching_accounts<'a>(
                 || a.account_key.to_lowercase().contains(&q)
         })
         .collect()
+}
+
+// ─── Runtime state persistence ───
+
+/// Persist an account's runtime state to `registry.json`.
+///
+/// - `last_usage`: if `Some`, overwrites the stored usage snapshot.
+/// - `set_exhausted_until`: if `true`, sets `exhausted_until` to the given
+///   value (which may be `None` to clear it); if `false`, leaves the
+///   existing value untouched.
+pub fn persist_account_state(
+    codex_home: &Path,
+    account_key: &str,
+    last_usage: Option<&LastUsage>,
+    exhausted_until: Option<i64>,
+    set_exhausted_until: bool,
+) {
+    let mut registry = load_registry(codex_home);
+    if let Some(acct) = registry
+        .accounts
+        .iter_mut()
+        .find(|a| a.account_key == account_key)
+    {
+        if let Some(usage) = last_usage {
+            acct.last_usage = Some(usage.clone());
+            acct.last_usage_at = Some(Utc::now().timestamp());
+        }
+        if set_exhausted_until {
+            acct.exhausted_until = exhausted_until;
+        }
+        acct.last_used_at = Some(Utc::now().timestamp());
+    }
+    if let Err(e) = save_registry(codex_home, &registry) {
+        warn!("Failed to persist account state: {e}");
+    }
+}
+
+/// Clear `exhausted_until` for all accounts whose cooldown has expired.
+/// Returns `true` if any records were modified (and saved).
+pub fn clear_expired_exhaustions(codex_home: &Path) -> bool {
+    let mut registry = load_registry(codex_home);
+    let now = Utc::now().timestamp();
+    let mut modified = false;
+    for acct in &mut registry.accounts {
+        if acct.exhausted_until.is_some_and(|until| until <= now) {
+            acct.exhausted_until = None;
+            modified = true;
+        }
+    }
+    if modified {
+        if let Err(e) = save_registry(codex_home, &registry) {
+            warn!("Failed to clear expired exhaustions: {e}");
+            return false;
+        }
+    }
+    modified
 }
 
 // ─── File helpers ───

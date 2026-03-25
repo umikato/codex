@@ -117,6 +117,8 @@ async fn run_pool_login(codex_home: &std::path::Path) -> Result<()> {
 // ─── List ───
 
 fn run_pool_list(codex_home: &std::path::Path, json: bool) -> Result<()> {
+    // Clear expired exhaustions before displaying so the list is accurate.
+    pool_registry::clear_expired_exhaustions(codex_home);
     let registry = pool_registry::load_registry(codex_home);
 
     if registry.accounts.is_empty() {
@@ -137,15 +139,23 @@ fn run_pool_list(codex_home: &std::path::Path, json: bool) -> Result<()> {
     );
     println!("{}", "─".repeat(75));
 
+    let now_ts = chrono::Utc::now().timestamp();
     for acct in &registry.accounts {
         let label = acct.display_label();
         let plan = acct.plan.as_deref().unwrap_or("-");
         let (primary_pct, weekly_pct) = format_usage(&acct.last_usage);
-        let active = if registry.active_account_key.as_deref() == Some(&acct.account_key) {
-            "← active"
-        } else {
-            ""
-        };
+
+        let mut status_parts = Vec::new();
+        if registry.active_account_key.as_deref() == Some(&acct.account_key) {
+            status_parts.push("← active".to_string());
+        }
+        if let Some(until) = acct.exhausted_until
+            && until > now_ts
+        {
+            let remaining_min = (until - now_ts + 59) / 60;
+            status_parts.push(format!("exhausted ({remaining_min}m)"));
+        }
+        let status = status_parts.join(" ");
 
         println!(
             "{:<30} {:<10} {:>6} {:>8}  {}",
@@ -153,7 +163,7 @@ fn run_pool_list(codex_home: &std::path::Path, json: bool) -> Result<()> {
             plan,
             primary_pct,
             weekly_pct,
-            active
+            status
         );
     }
 
@@ -196,6 +206,8 @@ fn run_pool_import(codex_home: &std::path::Path, path: &std::path::Path) -> Resu
 // ─── Switch ───
 
 fn run_pool_switch(codex_home: &std::path::Path, query: Option<&str>) -> Result<()> {
+    // Clear expired exhaustions so the switch considers up-to-date state.
+    pool_registry::clear_expired_exhaustions(codex_home);
     let registry = pool_registry::load_registry(codex_home);
 
     if registry.accounts.is_empty() {

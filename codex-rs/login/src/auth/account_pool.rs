@@ -4,6 +4,7 @@
 //! the best available account based on remaining quota.
 
 use chrono::DateTime;
+use chrono::TimeZone;
 use chrono::Utc;
 use std::fs;
 use std::path::Path;
@@ -105,12 +106,17 @@ impl AccountPool {
                 let label = acct.display_label().to_string();
                 let encoded = pool_registry::encode_account_key(&acct.account_key);
                 let auth_file = accounts_dir.join(format!("{encoded}.auth.json"));
+                // Restore exhausted_until from persisted registry data.
+                let exhausted_until = acct
+                    .exhausted_until
+                    .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
+                    .filter(|dt| Utc::now() < *dt);
                 PoolEntry {
                     account_key: acct.account_key,
                     label,
                     auth_file,
                     last_usage: acct.last_usage,
-                    exhausted_until: None,
+                    exhausted_until,
                 }
             })
             .collect();
@@ -204,11 +210,13 @@ impl AccountPool {
     }
 
     /// Mark an account as exhausted by its unique `account_key`.
+    /// Persists the state (usage + exhausted_until) to `registry.json`.
     pub fn mark_exhausted(&self, account_key: &str, until: Option<DateTime<Utc>>) {
         let fallback = Utc::now() + chrono::Duration::minutes(5);
         let until = until.unwrap_or(fallback);
 
-        if let Ok(mut entries) = self.entries.write() {
+        let persisted_usage = if let Ok(mut entries) = self.entries.write() {
+            let mut found_usage = None;
             for entry in entries.iter_mut() {
                 if entry.account_key == account_key {
                     info!(
@@ -216,10 +224,23 @@ impl AccountPool {
                         entry.label, account_key, until
                     );
                     entry.exhausted_until = Some(until);
-                    return;
+                    found_usage = Some(entry.last_usage.clone());
+                    break;
                 }
             }
-        }
+            found_usage
+        } else {
+            None
+        };
+
+        // Persist to registry.json outside the lock.
+        pool_registry::persist_account_state(
+            &self.codex_home,
+            account_key,
+            persisted_usage.as_ref().and_then(|u| u.as_ref()),
+            Some(until.timestamp()),
+            true, // set exhausted_until
+        );
     }
 
     /// Get the account_key of the initially active account from the registry.
@@ -228,15 +249,15 @@ impl AccountPool {
         self.initial_active_key.as_deref()
     }
 
-    /// Update the cached usage score for an account so that candidate
-    /// selection can make informed decisions even without registry writes.
+    /// Update the cached usage score for an account and persist to registry.
     pub fn update_usage(
         &self,
         account_key: &str,
         primary_used_pct: Option<f64>,
         secondary_used_pct: Option<f64>,
     ) {
-        if let Ok(mut entries) = self.entries.write() {
+        let persisted_usage = if let Ok(mut entries) = self.entries.write() {
+            let mut found_usage = None;
             for entry in entries.iter_mut() {
                 if entry.account_key == account_key {
                     let usage = entry.last_usage.get_or_insert(
@@ -266,9 +287,24 @@ impl AccountPool {
                         );
                         w.used_percent = Some(pct);
                     }
-                    return;
+                    found_usage = Some(usage.clone());
+                    break;
                 }
             }
+            found_usage
+        } else {
+            None
+        };
+
+        // Persist usage to registry.json outside the lock.
+        if let Some(ref usage) = persisted_usage {
+            pool_registry::persist_account_state(
+                &self.codex_home,
+                account_key,
+                Some(usage),
+                None,
+                false, // don't change exhausted_until
+            );
         }
     }
 
